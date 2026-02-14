@@ -1,0 +1,134 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+import shutil
+
+import typer
+from PIL import Image, ExifTags
+from rich.console import Console
+from rich.table import Table
+
+app = typer.Typer(add_completion=False)
+console = Console()
+
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".heic", ".webp"}
+
+
+@dataclass(frozen=True)
+class PlanItem:
+    src: Path
+    dest: Path
+    reason: str
+
+
+def exif_datetime_taken(path: Path) -> datetime | None:
+    # Best-effort EXIF DateTimeOriginal extraction
+    try:
+        if path.suffix.lower() not in IMAGE_EXTS:
+            return None
+        img = Image.open(path)
+        exif = img.getexif()
+        if not exif:
+            return None
+
+        tag_map = {v: k for k, v in ExifTags.TAGS.items()}
+        dto_key = tag_map.get("DateTimeOriginal")
+        if not dto_key:
+            return None
+
+        raw = exif.get(dto_key)
+        if not raw:
+            return None
+
+        # Common EXIF format: "YYYY:MM:DD HH:MM:SS"
+        return datetime.strptime(str(raw), "%Y:%m:%d %H:%M:%S")
+    except Exception:
+        return None
+
+
+def file_mtime(path: Path) -> datetime:
+    return datetime.fromtimestamp(path.stat().st_mtime)
+
+
+def compute_dest(root_out: Path, taken: datetime, filename: str) -> Path:
+    return root_out / f"{taken:%Y}" / f"{taken:%Y-%m}" / filename
+
+
+def build_plan(src_dir: Path, out_dir: Path) -> list[PlanItem]:
+    plan: list[PlanItem] = []
+    for p in src_dir.rglob("*"):
+        if not p.is_file():
+            continue
+        taken = exif_datetime_taken(p) or file_mtime(p)
+        reason = "EXIF" if exif_datetime_taken(p) else "mtime"
+        dest = compute_dest(out_dir, taken, p.name)
+        plan.append(PlanItem(src=p, dest=dest, reason=reason))
+    return plan
+
+
+def print_plan(plan: list[PlanItem], limit: int = 30) -> None:
+    table = Table(title=f"Planned moves (showing up to {limit})")
+    table.add_column("Source", overflow="fold")
+    table.add_column("Destination", overflow="fold")
+    table.add_column("Reason", style="dim")
+
+    for item in plan[:limit]:
+        table.add_row(str(item.src), str(item.dest), item.reason)
+
+    console.print(table)
+    if len(plan) > limit:
+        console.print(f"[dim]…and {len(plan) - limit} more[/dim]")
+
+
+@app.command()
+def organize(
+    src: Path = typer.Argument(..., exists=True, file_okay=False, dir_okay=True),
+    out: Path = typer.Argument(..., file_okay=False, dir_okay=True),
+    dry_run: bool = typer.Option(True, "--dry-run/--do-it", help="Preview only (default)"),
+):
+    """
+    Organize photos/videos into YYYY/YYYY-MM folders using EXIF DateTimeOriginal when available.
+    """
+    src = src.expanduser().resolve()
+    out = out.expanduser().resolve()
+
+    if out == src or out.is_relative_to(src):
+        raise typer.BadParameter("Output folder must not be inside the source folder.")
+
+    plan = build_plan(src, out)
+    if not plan:
+        console.print("[yellow]No files found.[/yellow]")
+        raise typer.Exit(code=0)
+
+    print_plan(plan)
+
+    if dry_run:
+        console.print("[cyan]Dry run enabled. No files moved.[/cyan]")
+        raise typer.Exit(code=0)
+
+    moved = 0
+    for item in plan:
+        item.dest.parent.mkdir(parents=True, exist_ok=True)
+        if item.dest.exists():
+            # Avoid overwriting: add a suffix
+            stem = item.dest.stem
+            suffix = item.dest.suffix
+            i = 1
+            while True:
+                candidate = item.dest.with_name(f"{stem}-{i}{suffix}")
+                if not candidate.exists():
+                    item_dest = candidate
+                    break
+                i += 1
+            shutil.move(str(item.src), str(item_dest))
+        else:
+            shutil.move(str(item.src), str(item.dest))
+        moved += 1
+
+    console.print(f"[green]Done.[/green] Moved {moved} files to {out}")
+
+
+if __name__ == "__main__":
+    app()
