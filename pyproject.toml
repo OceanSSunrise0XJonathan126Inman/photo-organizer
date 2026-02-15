@@ -16,5 +16,6 @@ dependencies = [
 
 [project.scripts]
 photo-organizer = "photo_organizer.cli:app"
+
 [project.optional-dependencies]
 dev = ["pytest"]
