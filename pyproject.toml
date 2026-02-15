@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "photo-organizer"
+version = "0.1.0"
+description = "Organize photos into folders by date."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "typer>=0.9",
+  "Pillow>=10.0",
+  "rich>=13.0",
+]
+
+[project.scripts]
+photo-organizer = "photo_organizer.cli:app"
