@@ -4,7 +4,11 @@
 Organizes photos into folders based on date taken/created.
 
 ## How to run
-(put your command here)
+### Dry run (default)
+photo-organizer SRC OUT
+
+### Execute (makes changes)
+photo-organizer --do-it SRC OUT
 ## Setup
 ```bash
 python3 -m venv .venv
