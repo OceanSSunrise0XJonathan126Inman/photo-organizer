@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
+from importlib.metadata import PackageNotFoundError, version as pkg_version
 from pathlib import Path
 import shutil
 
@@ -13,121 +14,112 @@ from rich.table import Table
 app = typer.Typer(add_completion=False)
 console = Console()
 
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".heic", ".webp"}
+
+def _version_callback(value: bool):
+    if not value:
+        return
+    try:
+        typer.echo(pkg_version("photo-organizer"))
+    except PackageNotFoundError:
+        typer.echo("unknown")
+    raise typer.Exit()
 
 
 @dataclass(frozen=True)
-class PlanItem:
+class PlannedMove:
     src: Path
-    dest: Path
-    reason: str
+    dst: Path
 
 
-def exif_datetime_taken(path: Path) -> datetime | None:
-    # Best-effort EXIF DateTimeOriginal extraction
+def _exif_datetime(path: Path) -> datetime | None:
     try:
-        if path.suffix.lower() not in IMAGE_EXTS:
-            return None
         img = Image.open(path)
-        exif = img.getexif()
+        exif = getattr(img, "getexif", lambda: None)()
         if not exif:
             return None
 
-        tag_map = {v: k for k, v in ExifTags.TAGS.items()}
-        dto_key = tag_map.get("DateTimeOriginal")
-        if not dto_key:
+        tagmap = {k: ExifTags.TAGS.get(k, k) for k in exif.keys()}
+
+        def get_tag(name: str) -> str | None:
+            for k, v in exif.items():
+                if tagmap.get(k) == name and isinstance(v, str):
+                    return v
             return None
 
-        raw = exif.get(dto_key)
-        if not raw:
-            return None
-
-        # Common EXIF format: "YYYY:MM:DD HH:MM:SS"
-        return datetime.strptime(str(raw), "%Y:%m:%d %H:%M:%S")
+        for key in ("DateTimeOriginal", "DateTimeDigitized", "DateTime"):
+            s = get_tag(key)
+            if s:
+                try:
+                    return datetime.strptime(s, "%Y:%m:%d %H:%M:%S")
+                except ValueError:
+                    pass
+        return None
     except Exception:
         return None
 
 
-def file_mtime(path: Path) -> datetime:
-    return datetime.fromtimestamp(path.stat().st_mtime)
+def _file_datetime_utc(path: Path) -> datetime:
+    ts = path.stat().st_mtime
+    return datetime.fromtimestamp(ts, tz=timezone.utc)
 
 
-def compute_dest(root_out: Path, taken: datetime, filename: str) -> Path:
-    return root_out / f"{taken:%Y}" / f"{taken:%Y-%m}" / filename
+def _pick_datetime(path: Path) -> datetime:
+    exif_dt = _exif_datetime(path)
+    if exif_dt is not None:
+        return exif_dt
+    return _file_datetime_utc(path)
 
 
-def build_plan(src_dir: Path, out_dir: Path) -> list[PlanItem]:
-    plan: list[PlanItem] = []
+def _iter_images(src_dir: Path) -> list[Path]:
+    exts = {".jpg", ".jpeg", ".png", ".heic", ".tif", ".tiff"}
+    files: list[Path] = []
     for p in src_dir.rglob("*"):
-        if not p.is_file():
-            continue
-        taken = exif_datetime_taken(p) or file_mtime(p)
-        reason = "EXIF" if exif_datetime_taken(p) else "mtime"
-        dest = compute_dest(out_dir, taken, p.name)
-        plan.append(PlanItem(src=p, dest=dest, reason=reason))
-    return plan
+        if p.is_file() and p.suffix.lower() in exts:
+            files.append(p)
+    return sorted(files)
 
 
-def print_plan(plan: list[PlanItem], limit: int = 30) -> None:
-    table = Table(title=f"Planned moves (showing up to {limit})")
-    table.add_column("Source", overflow="fold")
-    table.add_column("Destination", overflow="fold")
-    table.add_column("Reason", style="dim")
+def _plan_moves(src_dir: Path, out_dir: Path) -> list[PlannedMove]:
+    moves: list[PlannedMove] = []
+    for p in _iter_images(src_dir):
+        dt = _pick_datetime(p)
+        year = f"{dt.year:04d}"
+        year_month = f"{dt.year:04d}-{dt.month:02d}"
+        dst_dir = out_dir / year / year_month
+        dst = dst_dir / p.name
+        moves.append(PlannedMove(src=p, dst=dst))
+    return moves
 
-    for item in plan[:limit]:
-        table.add_row(str(item.src), str(item.dest), item.reason)
 
+def _print_plan(moves: list[PlannedMove], do_it: bool) -> None:
+    title = "Planned moves" if not do_it else "Executed moves"
+    table = Table(title=title)
+    table.add_column("From")
+    table.add_column("To")
+    for m in moves[:30]:
+        table.add_row(str(m.src), str(m.dst))
+    if len(moves) > 30:
+        table.add_row("...", f"({len(moves)} total)")
     console.print(table)
-    if len(plan) > limit:
-        console.print(f"[dim]…and {len(plan) - limit} more[/dim]")
 
 
 @app.command()
-def organize(
+def main(
     src: Path = typer.Argument(..., exists=True, file_okay=False, dir_okay=True),
     out: Path = typer.Argument(..., file_okay=False, dir_okay=True),
-    dry_run: bool = typer.Option(True, "--dry-run/--do-it", help="Preview only (default)"),
+    do_it: bool = typer.Option(False, "--do-it", help="Apply changes (otherwise dry-run)."),
+    version: bool = typer.Option(None, "--version", callback=_version_callback, is_eager=True),
 ):
-    """
-    Organize photos/videos into YYYY/YYYY-MM folders using EXIF DateTimeOriginal when available.
-    """
-    src = src.expanduser().resolve()
-    out = out.expanduser().resolve()
+    out.mkdir(parents=True, exist_ok=True)
 
-    if out == src or out.is_relative_to(src):
-        raise typer.BadParameter("Output folder must not be inside the source folder.")
+    moves = _plan_moves(src, out)
 
-    plan = build_plan(src, out)
-    if not plan:
-        console.print("[yellow]No files found.[/yellow]")
-        raise typer.Exit(code=0)
+    if do_it:
+        for m in moves:
+            m.dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(m.src), str(m.dst))
 
-    print_plan(plan)
-
-    if dry_run:
-        console.print("[cyan]Dry run enabled. No files moved.[/cyan]")
-        raise typer.Exit(code=0)
-
-    moved = 0
-    for item in plan:
-        item.dest.parent.mkdir(parents=True, exist_ok=True)
-        if item.dest.exists():
-            # Avoid overwriting: add a suffix
-            stem = item.dest.stem
-            suffix = item.dest.suffix
-            i = 1
-            while True:
-                candidate = item.dest.with_name(f"{stem}-{i}{suffix}")
-                if not candidate.exists():
-                    item_dest = candidate
-                    break
-                i += 1
-            shutil.move(str(item.src), str(item_dest))
-        else:
-            shutil.move(str(item.src), str(item.dest))
-        moved += 1
-
-    console.print(f"[green]Done.[/green] Moved {moved} files to {out}")
+    _print_plan(moves, do_it=do_it)
 
 
 if __name__ == "__main__":
