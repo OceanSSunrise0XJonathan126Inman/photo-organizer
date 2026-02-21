@@ -15,7 +15,10 @@ dependencies = [
 ]
 
 [project.scripts]
-photo-organizer = "photo_organizer.cli:app"
+photo-organizer = "photo_organizer.cli:cli"
 
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = ["pytest"] 
+
+[tool.setuptools]
+packages = ["photo_organizer"]
