@@ -20,7 +20,7 @@ def _version_callback(value: bool):
     if not value:
         return
     try:
-        typer.echo(pkg_version("photo-organizer"))
+        typer.echo(pkg_version("photo-organizer-cli"))
     except PackageNotFoundError:
         typer.echo("unknown")
     raise typer.Exit()
