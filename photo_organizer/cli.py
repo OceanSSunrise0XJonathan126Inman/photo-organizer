@@ -12,6 +12,7 @@ from rich.console import Console
 from rich.table import Table
 
 app = typer.Typer(add_completion=False)
+cli = app
 console = Console()
 
 
